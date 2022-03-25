@@ -4,14 +4,13 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"jsouthworth.net/go/btree/internal/atomic"
+	"sync/atomic"
+	"unsafe"
 )
 
 type leafNode[T any] struct {
+	nodeHeader[T]
 	keys []T
-	len  int
-	edit *atomic.Bool
 }
 
 func newLeaf[T any](len int, edit *atomic.Bool) *leafNode[T] {
@@ -19,7 +18,7 @@ func newLeaf[T any](len int, edit *atomic.Bool) *leafNode[T] {
 		len:  len,
 		edit: edit,
 	}
-	if edit.Deref() {
+	if edit.Load() {
 		out.keys = make([]T, min(maxLen, len+expandLen))
 	} else {
 		out.keys = make([]T, len)
@@ -27,8 +26,12 @@ func newLeaf[T any](len int, edit *atomic.Bool) *leafNode[T] {
 	return &out
 }
 
+func (n *leafNode[T]) header() *nodeHeader[T] {
+	return (*nodeHeader[T])(unsafe.Pointer(n))
+}
+
 func (n *leafNode[T]) isEditable() bool {
-	return n.edit.Deref()
+	return n.edit.Load()
 }
 
 func (n *leafNode[T]) leafPart() *leafNode[T] {
@@ -112,11 +115,11 @@ func (n *leafNode[T]) modifyInPlace(
 ) nodeReturn[T] {
 	if replace {
 		n.keys[ins] = key
-		return nodeReturn[T]{status: returnReplaced, nodes: [3]node[T]{n}}
+		return nodeReturn[T]{status: returnReplaced, nodes: [3]*nodeHeader[T]{n}}
 	} else if ins == n.len {
 		n.keys[n.len] = key
 		n.len++
-		return nodeReturn[T]{status: returnOne, nodes: [3]node[T]{n}}
+		return nodeReturn[T]{status: returnOne, nodes: [3]*nodeHeader[T]{n}}
 	} else {
 		copy(n.keys[ins+1:], n.keys[ins:n.len])
 		n.keys[ins] = key
@@ -133,7 +136,7 @@ func (n *leafNode[T]) copyAndInsertNode(
 	ks.copyAll(n.keys, 0, ins)
 	ks.copyOne(key)
 	ks.copyAll(n.keys, ins, n.len)
-	return nodeReturn[T]{status: returnOne, nodes: [3]node[T]{nl}}
+	return nodeReturn[T]{status: returnOne, nodes: [3]*nodeHeader[T]{nl}}
 }
 
 func (n *leafNode[T]) copyAndReplaceNode(
@@ -142,7 +145,7 @@ func (n *leafNode[T]) copyAndReplaceNode(
 	nl := newLeaf[T](n.len, edit)
 	copy(nl.keys, n.keys)
 	nl.keys[ins] = key
-	return nodeReturn[T]{status: returnReplaced, nodes: [3]node[T]{nl}}
+	return nodeReturn[T]{status: returnReplaced, nodes: [3]*nodeHeader[T]{nl}}
 }
 
 func (n *leafNode[T]) split(
@@ -159,7 +162,7 @@ func (n *leafNode[T]) split(
 		ks.copyOne(key)
 		ks.copyAll(n.keys, ins, firstHalf-1)
 		copy(n2.keys, n.keys[firstHalf-1:n.len])
-		return nodeReturn[T]{status: returnTwo, nodes: [3]node[T]{n1, n2}}
+		return nodeReturn[T]{status: returnTwo, nodes: [3]*nodeHeader[T]{n1, n2}}
 	}
 
 	copy(n1.keys, n.keys[0:firstHalf])
@@ -167,12 +170,12 @@ func (n *leafNode[T]) split(
 	ks.copyAll(n.keys, firstHalf, ins)
 	ks.copyOne(key)
 	ks.copyAll(n.keys, ins, n.len)
-	return nodeReturn[T]{status: returnTwo, nodes: [3]node[T]{n1, n2}}
+	return nodeReturn[T]{status: returnTwo, nodes: [3]*nodeHeader[T]{n1, n2}}
 }
 
 func (n *leafNode[T]) remove(
 	key T,
-	leftNode, rightNode node[T],
+	leftNode, rightNode *nodeHeader[T],
 	cmp compareFunc[T],
 	edit *atomic.Bool,
 ) (out nodeReturn[T]) {
@@ -228,7 +231,7 @@ func (n *leafNode[T]) removeInPlace(
 	if idx == newLen {
 		return nodeReturn[T]{
 			status: returnThree,
-			nodes: [...]node[T]{
+			nodes: [...]*nodeHeader[T]{
 				leafNodeToNode(left),
 				n,
 				leafNodeToNode(right),
@@ -248,7 +251,7 @@ func (n *leafNode[T]) copyAndRemoveIdx(
 	copy(center.keys[idx:], n.keys[idx+1:])
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes: [...]node[T]{
+		nodes: [...]*nodeHeader[T]{
 			leafNodeToNode(left),
 			center,
 			leafNodeToNode(right),
@@ -268,7 +271,7 @@ func (n *leafNode[T]) joinLeft(
 	ks.copyAll(n.keys, idx+1, n.len)
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [...]node[T]{nil, join, leafNodeToNode(right)},
+		nodes:  [...]*nodeHeader[T]{nil, join, leafNodeToNode(right)},
 	}
 }
 
@@ -284,7 +287,7 @@ func (n *leafNode[T]) joinRight(
 	ks.copyAll(right.keys, 0, right.len)
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [...]node[T]{leafNodeToNode(left), join, nil},
+		nodes:  [...]*nodeHeader[T]{leafNodeToNode(left), join, nil},
 	}
 }
 
@@ -332,7 +335,7 @@ func (n *leafNode[T]) borrowLeft(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [...]node[T]{newLeft, newCenter, leafNodeToNode(right)},
+		nodes:  [...]*nodeHeader[T]{newLeft, newCenter, leafNodeToNode(right)},
 	}
 }
 
@@ -376,7 +379,7 @@ func (n *leafNode[T]) borrowRight(
 	}
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [...]node[T]{leafNodeToNode(left), newCenter, newRight},
+		nodes:  [...]*nodeHeader[T]{leafNodeToNode(left), newCenter, newRight},
 	}
 }
 
@@ -397,9 +400,9 @@ func (n *leafNode[T]) string(b *strings.Builder, lvl int) {
 	b.WriteRune('}')
 }
 
-func leafNodeToNode[T any](n *leafNode[T]) node[T] {
+func leafNodeToNode[T any](n *leafNode[T]) *nodeHeader[T] {
 	if n != nil {
-		return n
+		return n.header()
 	}
 	return nil
 }

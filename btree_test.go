@@ -2,6 +2,7 @@ package btree_test
 
 import (
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -545,6 +546,13 @@ func TestSpeedTransientAdd(t *testing.T) {
 		tree = tree.Add(i)
 	}
 	t.Log(time.Since(now))
+	pt := tree.AsPersistent()
+	runtime.GC()
+	runtime.GC()
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	fmt.Println(stats.Alloc)
+	runtime.KeepAlive(pt)
 }
 
 func TestSpeedTransientContains(t *testing.T) {

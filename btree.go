@@ -4,8 +4,7 @@ package btree
 import (
 	"fmt"
 	"strings"
-
-	"jsouthworth.net/go/btree/internal/atomic"
+	"sync/atomic"
 )
 
 type Error string
@@ -17,7 +16,7 @@ func (e Error) Error() string {
 const ErrTafterP = Error("transient used after persistent call")
 
 type BTree[T any] struct {
-	root    node[T]
+	root    *nodeHeader[T]
 	count   int
 	version int
 	edit    *atomic.Bool
@@ -26,7 +25,13 @@ type BTree[T any] struct {
 	eq  eqFunc[T]
 }
 
-var emptyEdit = atomic.NewBool(false)
+func newBool(val bool) *atomic.Bool {
+	var b atomic.Bool
+	b.Store(val)
+	return &b
+}
+
+var emptyEdit = newBool(false)
 
 func Empty[T any](cmp func(a, b T) int, eq func(a, b T) bool) *BTree[T] {
 	return &BTree[T]{
@@ -53,7 +58,7 @@ func (t *BTree[T]) Find(key T) (T, bool) {
 
 func (t *BTree[T]) Add(key T) *BTree[T] {
 	ret := t.root.add(key, t.cmp, t.eq, t.edit)
-	var newRoot node[T]
+	var newRoot *nodeHeader[T]
 	switch ret.status {
 	case returnUnchanged:
 		return t
@@ -127,16 +132,18 @@ func (t *BTree[T]) IteratorFrom(from T) Iterator[T] {
 	return i
 }
 
+// TODO: DebuggingIterator to track numbers of internalnode, leafnode, values.
+
 type Iterator[T any] struct {
 	cmp   compareFunc[T]
 	depth int
 	stack [maxIterDepth]struct {
-		n   node[T]
+		n   *nodeHeader[T]
 		cur int
 	}
 }
 
-func makeIterator[T any](cmp compareFunc[T], n node[T]) Iterator[T] {
+func makeIterator[T any](cmp compareFunc[T], n *nodeHeader[T]) Iterator[T] {
 	var i Iterator[T]
 	i.cmp = cmp
 	i.stack[0].n = n
@@ -185,7 +192,7 @@ func (i *Iterator[T]) HasNext() bool {
 	}
 }
 
-func (i *Iterator[T]) pushNode(n node[T]) {
+func (i *Iterator[T]) pushNode(n *nodeHeader[T]) {
 	i.depth = i.depth + 1
 	state := i.stack[i.depth]
 	state.n = n
@@ -223,7 +230,7 @@ func (i *Iterator[T]) findFirst(from T) {
 }
 
 type TBTree[T any] struct {
-	root    node[T]
+	root    *nodeHeader[T]
 	count   int
 	version int
 	edit    *atomic.Bool
@@ -239,7 +246,7 @@ func (t *BTree[T]) AsTransient() *TBTree[T] {
 		root:    t.root,
 		count:   t.count,
 		version: t.version,
-		edit:    atomic.NewBool(true),
+		edit:    newBool(true),
 		cmp:     t.cmp,
 		eq:      t.eq,
 
@@ -328,7 +335,7 @@ func (t *TBTree[T]) String() string {
 
 func (t *TBTree[T]) AsPersistent() *BTree[T] {
 	t.ensureEditable()
-	t.edit.Reset(false)
+	t.edit.Store(false)
 	if t.root == t.orig.root {
 		return t.orig
 	}
@@ -343,7 +350,7 @@ func (t *TBTree[T]) AsPersistent() *BTree[T] {
 }
 
 func (t *TBTree[T]) ensureEditable() {
-	if !t.edit.Deref() {
+	if !t.edit.Load() {
 		panic(ErrTafterP)
 	}
 }
@@ -364,17 +371,6 @@ const (
 	// 13.
 	maxIterDepth = (64 + 1) / 5
 )
-
-type node[T any] interface {
-	search(key T, cmp compareFunc[T]) int
-	searchFirst(key T, cmp compareFunc[T]) int
-	find(key T, cmp compareFunc[T]) (T, bool)
-	add(key T, cmp compareFunc[T], eq eqFunc[T], edit *atomic.Bool) nodeReturn[T]
-	remove(key T, left, right node[T], cmp compareFunc[T], edit *atomic.Bool) nodeReturn[T]
-	leafPart() *leafNode[T]
-	maxKey() T
-	string(b *strings.Builder, lvl int)
-}
 
 type returnStatus uint8
 
@@ -402,7 +398,7 @@ func (s returnStatus) String() string {
 
 type nodeReturn[T any] struct {
 	status returnStatus
-	nodes  [3]node[T]
+	nodes  [3]*nodeHeader[T]
 }
 
 func (r nodeReturn[T]) String() string {

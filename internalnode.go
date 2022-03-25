@@ -3,25 +3,101 @@ package btree
 import (
 	"fmt"
 	"strings"
-
-	"jsouthworth.net/go/btree/internal/atomic"
+	"sync/atomic"
+	"unsafe"
 )
 
-type internalNode[T any] struct {
-	*leafNode[T]
+type nodeKind uint8
 
-	children []node[T]
+const (
+	nodeKindInternal nodeKind = iota
+	nodeKindLeaf
+)
+
+type nodeHeader[T any] struct {
+	kind nodeKind
+	size int8
+	edit *atomic.Bool
+}
+
+func (h *nodeHeader[T]) asInternalNode() *internalNode[T] {
+	return (*internalNode[T])(unsafe.Pointer(h))
+}
+
+func (h *nodeHeader[T]) asLeafNode() *leafNode[T] {
+	return (*leafNode[T])(unsafe.Pointer(h))
+}
+
+func (h *nodeHeader[T]) search(key T, cmp compareFunc[T]) int {
+	if h.kind == nodeKindLeaf {
+		return h.asLeafNode().search(key, cmp)
+	}
+	return h.asInternalNode().search(key, cmp)
+}
+
+func (h *nodeHeader[T]) searchFirst(key T, cmp compareFunc[T]) int {
+	if h.kind == nodeKindLeaf {
+		return h.asLeafNode().searchFirst(key, cmp)
+	}
+	return h.asInternalNode().searchFirst(key, cmp)
+}
+
+func (h *nodeHeader[T]) find(key T, cmp compareFunc[T]) (T, bool) {
+	if h.kind == nodeKindLeaf {
+		return h.asLeafNode().find(key, cmp)
+	}
+	return h.asInternalNode().find(key, cmp)
+}
+
+func (h *nodeHeader[T]) add(key T, cmp compareFunc[T], eq eqFunc[T], edit *atomic.Bool) nodeReturn[T] {
+	if h.kind == nodeKindLeaf {
+		return h.asLeafNode().add(key, cmp, eq, edit)
+	}
+	return h.asInternalNode().add(key, cmp, eq, edit)
+}
+
+func (h *nodeHeader[T]) remove(key T, left, right *nodeHeader[T], cmp compareFunc[T], edit *atomic.Bool) nodeReturn[T] {
+	if h.kind == nodeKindLeaf {
+		return h.asLeafNode().remove(key, left, right, cmp, edit)
+	}
+	return h.asInternalNode().remove(key, left, right, cmp, edit)
+}
+
+func (h *nodeHeader[T]) maxKey() T {
+	if h.kind == nodeKindLeaf {
+		return h.asLeafNode().maxKey()
+	}
+	return h.asInternalNode().maxKey()
+}
+
+func (h *nodeHeader[T]) string(b *strings.Builder, lvl int) {
+	if h.kind == nodeKindLeaf {
+		return h.asLeafNode().string(b, lvl)
+	}
+	return h.asInternalNode().string(b, lvl)
+}
+
+type internalNodeEntry[T any] struct {
+	key   T
+	entry *nodeHeader[T]
+}
+
+type internalNode[T any] struct {
+	nodeHeader[T]
+	children []internalNodeEntry[T]
 }
 
 func newNode[T any](len int, edit *atomic.Bool) *internalNode[T] {
 	return &internalNode[T]{
-		leafNode: &leafNode[T]{
-			keys: make([]T, len),
-			len:  len,
-			edit: edit,
-		},
-		children: make([]node[T], len),
+		kind:     nodeKindInternal,
+		size:     len,
+		edit:     edit,
+		children: make([]internalNodeEntry[T], len),
 	}
+}
+
+func (n *internalNode[T]) header() *nodeHeader[T] {
+	return (*nodeHeader[T])(unsafe.Pointer(n))
 }
 
 func (n *internalNode[T]) find(key T, cmp compareFunc[T]) (T, bool) {
@@ -71,21 +147,25 @@ func (n *internalNode[T]) add(
 	}
 }
 
+func (n *internalNode[T]) maxKey() T {
+	return n.children[n.len-1].key
+}
+
 func (n *internalNode[T]) modifyInPlace(
-	ins int, eq eqFunc[T], new node[T], status returnStatus,
+	ins int, eq eqFunc[T], new *nodeHeader[T], status returnStatus,
 ) nodeReturn[T] {
 	n.keys[ins] = new.maxKey()
 	n.children[ins] = new
 	if ins == n.len-1 && eq(new.maxKey(), n.maxKey()) {
 		return nodeReturn[T]{
 			status: status,
-			nodes:  [3]node[T]{n},
+			nodes:  [3]*nodeHeader[T]{n},
 		}
 	}
 	if status == returnReplaced {
 		return nodeReturn[T]{
 			status: status,
-			nodes:  [3]node[T]{n},
+			nodes:  [3]*nodeHeader[T]{n},
 		}
 	}
 	return nodeReturn[T]{status: returnEarly}
@@ -95,7 +175,7 @@ func (n *internalNode[T]) copyAndModify(
 	ins int,
 	eq eqFunc[T],
 	edit *atomic.Bool,
-	newNode node[T],
+	newNode *nodeHeader[T],
 	status returnStatus,
 ) nodeReturn[T] {
 	var newKeys []T
@@ -107,17 +187,17 @@ func (n *internalNode[T]) copyAndModify(
 		newKeys[ins] = newNode.maxKey()
 	}
 
-	var newChildren []node[T]
+	var newChildren []*nodeHeader[T]
 	if newNode == n.children[ins] {
 		newChildren = n.children
 	} else {
-		newChildren = make([]node[T], n.len)
+		newChildren = make([]*nodeHeader[T], n.len)
 		copy(newChildren, n.children)
 		newChildren[ins] = newNode
 	}
 	return nodeReturn[T]{
 		status: status,
-		nodes: [3]node[T]{
+		nodes: [3]*nodeHeader[T]{
 			&internalNode[T]{
 				leafNode: &leafNode[T]{
 					keys: newKeys,
@@ -132,17 +212,11 @@ func (n *internalNode[T]) copyAndModify(
 
 func (n *internalNode[T]) copyAndAppend(
 	ins int,
-	n1, n2 node[T],
+	n1, n2 *nodeHeader[T],
 	edit *atomic.Bool,
 ) nodeReturn[T] {
 	newNode := newNode[T](n.len+1, edit)
-	kstitch := keyStitcher[T]{newNode.keys, 0}
-	kstitch.copyAll(n.keys, 0, ins)
-	kstitch.copyOne(n1.maxKey())
-	kstitch.copyOne(n2.maxKey())
-	kstitch.copyAll(n.keys, ins+1, n.len)
-
-	nstitch := nodeStitcher[T]{newNode.children, 0}
+	nstitch := stitcher[T]{newNode.children, 0}
 	nstitch.copyAll(n.children, 0, ins)
 	nstitch.copyOne(n1)
 	nstitch.copyOne(n2)
@@ -150,13 +224,13 @@ func (n *internalNode[T]) copyAndAppend(
 
 	return nodeReturn[T]{
 		status: returnOne,
-		nodes:  [3]node[T]{newNode},
+		nodes:  [3]*nodeHeader[T]{newNode},
 	}
 }
 
 func (n *internalNode[T]) split(
 	ins int,
-	n1, n2 node[T],
+	n1, n2 *nodeHeader[T],
 	edit *atomic.Bool,
 ) nodeReturn[T] {
 	half1 := (n.len + 1) >> 1
@@ -170,14 +244,7 @@ func (n *internalNode[T]) split(
 
 	// add to first half
 	if ins < half1 {
-		ks := keyStitcher[T]{node1.keys, 0}
-		ks.copyAll(n.keys, 0, ins)
-		ks.copyOne(n1.maxKey())
-		ks.copyOne(n2.maxKey())
-		ks.copyAll(n.keys, ins+1, half1-1)
-		copy(node2.keys, n.keys[half1-1:n.len])
-
-		ns := nodeStitcher[T]{node1.children, 0}
+		ns := stitcher[T]{node1.children, 0}
 		ns.copyAll(n.children, 0, ins)
 		ns.copyOne(n1)
 		ns.copyOne(n2)
@@ -186,7 +253,7 @@ func (n *internalNode[T]) split(
 
 		return nodeReturn[T]{
 			status: returnTwo,
-			nodes: [3]node[T]{
+			nodes: [3]*nodeHeader[T]{
 				node1,
 				node2,
 			},
@@ -194,15 +261,8 @@ func (n *internalNode[T]) split(
 	}
 
 	// add to second half
-	copy(node1.keys, n.keys[0:half1])
-	ks := keyStitcher[T]{node2.keys, 0}
-	ks.copyAll(n.keys, half1, ins)
-	ks.copyOne(n1.maxKey())
-	ks.copyOne(n2.maxKey())
-	ks.copyAll(n.keys, ins+1, n.len)
-
 	copy(node1.children, n.children[0:half1])
-	ns := nodeStitcher[T]{node2.children, 0}
+	ns := stitcher[T]{node2.children, 0}
 	ns.copyAll(n.children, half1, ins)
 	ns.copyOne(n1)
 	ns.copyOne(n2)
@@ -210,7 +270,7 @@ func (n *internalNode[T]) split(
 
 	return nodeReturn[T]{
 		status: returnTwo,
-		nodes: [3]node[T]{
+		nodes: [3]*nodeHeader[T]{
 			node1,
 			node2,
 		},
@@ -219,7 +279,7 @@ func (n *internalNode[T]) split(
 
 func (n *internalNode[T]) remove(
 	key T,
-	leftNode, rightNode node[T],
+	leftNode, rightNode *nodeHeader[T],
 	cmp compareFunc[T],
 	edit *atomic.Bool,
 ) nodeReturn[T] {
@@ -248,11 +308,11 @@ func (n *internalNode[T]) removeInternal(
 		return nodeReturn[T]{status: returnUnchanged}
 	}
 
-	var leftChild node[T]
+	var leftChild *nodeHeader[T]
 	if idx > 0 {
 		leftChild = n.children[idx-1]
 	}
-	var rightChild node[T]
+	var rightChild *nodeHeader[T]
 	if idx < n.len-1 {
 		rightChild = n.children[idx+1]
 	}
@@ -315,21 +375,9 @@ func (n *internalNode[T]) removeInPlace(
 	newLen int,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*nodeHeader[T],
 ) nodeReturn[T] {
-	ks := keyStitcher[T]{n.keys, max(idx-1, 0)}
-	if nodes[0] != nil {
-		ks.copyOne(nodes[0].maxKey())
-	}
-	ks.copyOne(nodes[1].maxKey())
-	if nodes[2] != nil {
-		ks.copyOne(nodes[2].maxKey())
-	}
-	if newLen != n.len {
-		ks.copyAll(n.keys, idx+2, n.len)
-	}
-
-	cs := nodeStitcher[T]{n.children, max(idx-1, 0)}
+	cs := stitcher[T]{n.children, max(idx-1, 0)}
 	if nodes[0] != nil {
 		cs.copyOne(nodes[0])
 	}
@@ -350,22 +398,10 @@ func (n *internalNode[T]) copyAndRemoveIdx(
 	newLen int,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*nodeHeader[T],
 ) nodeReturn[T] {
 	newCenter := newNode[T](newLen, edit)
-
-	ks := keyStitcher[T]{newCenter.keys, 0}
-	ks.copyAll(n.keys, 0, idx-1)
-	if nodes[0] != nil {
-		ks.copyOne(nodes[0].maxKey())
-	}
-	ks.copyOne(nodes[1].maxKey())
-	if nodes[2] != nil {
-		ks.copyOne(nodes[2].maxKey())
-	}
-	ks.copyAll(n.keys, idx+2, n.len)
-
-	cs := nodeStitcher[T]{newCenter.children, 0}
+	cs := stitcher[T]{newCenter.children, 0}
 	cs.copyAll(n.children, 0, idx-1)
 	if nodes[0] != nil {
 		cs.copyOne(nodes[0])
@@ -378,7 +414,7 @@ func (n *internalNode[T]) copyAndRemoveIdx(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes: [3]node[T]{
+		nodes: [3]*nodeHeader[T]{
 			internalNodeToNode(left),
 			newCenter,
 			internalNodeToNode(right),
@@ -391,23 +427,11 @@ func (n *internalNode[T]) joinLeft(
 	newLen int,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*nodeHeader[T],
 ) nodeReturn[T] {
 	join := newNode[T](left.len+newLen, edit)
 
-	ks := keyStitcher[T]{join.keys, 0}
-	ks.copyAll(left.keys, 0, left.len)
-	ks.copyAll(n.keys, 0, idx-1)
-	if nodes[0] != nil {
-		ks.copyOne(nodes[0].maxKey())
-	}
-	ks.copyOne(nodes[1].maxKey())
-	if nodes[2] != nil {
-		ks.copyOne(nodes[2].maxKey())
-	}
-	ks.copyAll(n.keys, idx+2, n.len)
-
-	cs := nodeStitcher[T]{join.children, 0}
+	cs := stitcher[T]{join.children, 0}
 	cs.copyAll(left.children, 0, left.len)
 	cs.copyAll(n.children, 0, idx-1)
 	if nodes[0] != nil {
@@ -421,7 +445,7 @@ func (n *internalNode[T]) joinLeft(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [3]node[T]{nil, join, internalNodeToNode(right)},
+		nodes:  [3]*nodeHeader[T]{nil, join, internalNodeToNode(right)},
 	}
 }
 
@@ -430,23 +454,11 @@ func (n *internalNode[T]) joinRight(
 	newLen int,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*nodeHeader[T],
 ) nodeReturn[T] {
 	join := newNode[T](newLen+right.len, edit)
 
-	ks := keyStitcher[T]{join.keys, 0}
-	ks.copyAll(n.keys, 0, idx-1)
-	if nodes[0] != nil {
-		ks.copyOne(nodes[0].maxKey())
-	}
-	ks.copyOne(nodes[1].maxKey())
-	if nodes[2] != nil {
-		ks.copyOne(nodes[2].maxKey())
-	}
-	ks.copyAll(n.keys, idx+2, n.len)
-	ks.copyAll(right.keys, 0, right.len)
-
-	cs := nodeStitcher[T]{join.children, 0}
+	cs := stitcher[T]{join.children, 0}
 	cs.copyAll(n.children, 0, idx-1)
 	if nodes[0] != nil {
 		cs.copyOne(nodes[0])
@@ -460,7 +472,7 @@ func (n *internalNode[T]) joinRight(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [3]node[T]{internalNodeToNode(left), join, nil},
+		nodes:  [3]*nodeHeader[T]{internalNodeToNode(left), join, nil},
 	}
 }
 
@@ -469,7 +481,7 @@ func (n *internalNode[T]) borrowLeft(
 	newLen int,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*nodeHeader[T],
 ) nodeReturn[T] {
 	var (
 		totalLen     = left.len + newLen
@@ -480,23 +492,9 @@ func (n *internalNode[T]) borrowLeft(
 	newLeft := newNode[T](newLeftLen, edit)
 	newCenter := newNode[T](newCenterLen, edit)
 
-	copy(newLeft.keys, left.keys[0:newLeftLen])
-
-	ks := keyStitcher[T]{newCenter.keys, 0}
-	ks.copyAll(left.keys, newLeftLen, left.len)
-	ks.copyAll(n.keys, 0, idx-1)
-	if nodes[0] != nil {
-		ks.copyOne(nodes[0].maxKey())
-	}
-	ks.copyOne(nodes[1].maxKey())
-	if nodes[2] != nil {
-		ks.copyOne(nodes[2].maxKey())
-	}
-	ks.copyAll(n.keys, idx+2, n.len)
-
 	copy(newLeft.children, left.children[0:newLeftLen])
 
-	cs := nodeStitcher[T]{newCenter.children, 0}
+	cs := stitcher[T]{newCenter.children, 0}
 	cs.copyAll(left.children, newLeftLen, left.len)
 	cs.copyAll(n.children, 0, idx-1)
 	if nodes[0] != nil {
@@ -510,7 +508,7 @@ func (n *internalNode[T]) borrowLeft(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [3]node[T]{newLeft, newCenter, internalNodeToNode(right)},
+		nodes:  [3]*nodeHeader[T]{newLeft, newCenter, internalNodeToNode(right)},
 	}
 }
 
@@ -519,7 +517,7 @@ func (n *internalNode[T]) borrowRight(
 	newLen int,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*nodeHeader[T],
 ) nodeReturn[T] {
 	var (
 		totalLen     = newLen + right.len
@@ -531,21 +529,7 @@ func (n *internalNode[T]) borrowRight(
 	newCenter := newNode[T](newCenterLen, edit)
 	newRight := newNode[T](newRightLen, edit)
 
-	ks := keyStitcher[T]{newCenter.keys, 0}
-	ks.copyAll(n.keys, 0, idx-1)
-	if nodes[0] != nil {
-		ks.copyOne(nodes[0].maxKey())
-	}
-	ks.copyOne(nodes[1].maxKey())
-	if nodes[2] != nil {
-		ks.copyOne(nodes[2].maxKey())
-	}
-	ks.copyAll(n.keys, idx+2, n.len)
-	ks.copyAll(right.keys, 0, rightHead)
-
-	copy(newRight.keys, right.keys[rightHead:right.len])
-
-	cs := nodeStitcher[T]{newCenter.children, 0}
+	cs := stitcher[T]{newCenter.children, 0}
 	cs.copyAll(n.children, 0, idx-1)
 	if nodes[0] != nil {
 		cs.copyOne(nodes[0])
@@ -561,7 +545,7 @@ func (n *internalNode[T]) borrowRight(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [3]node[T]{internalNodeToNode(left), newCenter, newRight},
+		nodes:  [3]*nodeHeader[T]{internalNodeToNode(left), newCenter, newRight},
 	}
 }
 
@@ -582,9 +566,9 @@ func (n *internalNode[T]) string(b *strings.Builder, lvl int) {
 	}
 }
 
-func internalNodeToNode[T any](n *internalNode[T]) node[T] {
+func internalNodeToNode[T any](n *internalNode[T]) *nodeHeader[T] {
 	if n != nil {
-		return n
+		return n.header()
 	}
 	return nil
 }
