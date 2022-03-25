@@ -1,7 +1,6 @@
 package btree_test
 
 import (
-	"constraints"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,7 +13,27 @@ import (
 	"jsouthworth.net/go/btree"
 )
 
-func compare[T constraints.Ordered](a,b T) int {
+type signed interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64
+}
+
+type unsigned interface {
+	~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr
+}
+
+type integer interface {
+	signed | unsigned
+}
+
+type float interface {
+	~float32 | ~float64
+}
+
+type ordered interface {
+	integer | float | ~string
+}
+
+func compare[T ordered](a, b T) int {
 	switch {
 	case a > b:
 		return 1
@@ -25,7 +44,7 @@ func compare[T constraints.Ordered](a,b T) int {
 	}
 }
 
-func eq[T comparable](a,b T) bool {
+func eq[T comparable](a, b T) bool {
 	return a == b
 }
 
@@ -612,7 +631,7 @@ func TestIterator(t *testing.T) {
 	iter := p.Iterator()
 	var got int
 	for iter.HasNext() {
-		got += iter.Next().(int)
+		got += iter.Next()
 	}
 	if sum != got {
 		t.Fatalf("didn't get expected value from iteration: got %v expected %v", got, sum)
@@ -638,7 +657,7 @@ func TestIteratorFrom(t *testing.T) {
 		iter := p.IteratorFrom(from)
 		var got int
 		for iter.HasNext() {
-			val := iter.Next().(int)
+			val := iter.Next()
 			got += val
 		}
 		if sums[i] != got {
@@ -666,7 +685,7 @@ func TestIteratorSmall(t *testing.T) {
 	expected := 1 + 2 + 3
 	var got int
 	for iter.HasNext() {
-		got += iter.Next().(int)
+		got += iter.Next()
 	}
 	if got != expected {
 		t.Fatalf("didn't get expected value from iteration: got %v expected %v", got, expected)

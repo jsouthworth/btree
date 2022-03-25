@@ -48,7 +48,7 @@ func (t *BTree[T]) At(key T) T {
 }
 
 func (t *BTree[T]) Find(key T) (T, bool) {
-	return  t.root.find(key, t.cmp)
+	return t.root.find(key, t.cmp)
 }
 
 func (t *BTree[T]) Add(key T) *BTree[T] {
@@ -143,7 +143,7 @@ func makeIterator[T any](cmp compareFunc[T], n node[T]) Iterator[T] {
 	return i
 }
 
-func (i *Iterator[T]) Next() interface{} {
+func (i *Iterator[T]) Next() T {
 	state := i.stack[i.depth]
 	n := state.n.(*leafNode[T])
 	out := n.keys[state.cur]
