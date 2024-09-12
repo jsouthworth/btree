@@ -8,20 +8,24 @@ import (
 )
 
 type internalNode[T any] struct {
-	*leafNode[T]
-
-	children []node[T]
+	node[T]
+	children []*node[T]
 }
 
-func newNode[T any](len int, edit *atomic.Bool) *internalNode[T] {
+func newNode[T any](len int8, edit *atomic.Bool) *internalNode[T] {
 	return &internalNode[T]{
-		leafNode: &leafNode[T]{
+		node: node[T]{
+			kind: nodeKindInternal,
 			keys: make([]T, len),
 			len:  len,
 			edit: edit,
 		},
-		children: make([]node[T], len),
+		children: make([]*node[T], len),
 	}
+}
+
+func (n *internalNode[T]) sizeOfChildArray() int8 {
+	return int8(len(n.children))
 }
 
 func (n *internalNode[T]) find(key T, cmp compareFunc[T]) (T, bool) {
@@ -72,30 +76,30 @@ func (n *internalNode[T]) add(
 }
 
 func (n *internalNode[T]) modifyInPlace(
-	ins int, eq eqFunc[T], new node[T], status returnStatus,
+	ins int8, eq eqFunc[T], new *node[T], status returnStatus,
 ) nodeReturn[T] {
 	n.keys[ins] = new.maxKey()
 	n.children[ins] = new
 	if ins == n.len-1 && eq(new.maxKey(), n.maxKey()) {
 		return nodeReturn[T]{
 			status: status,
-			nodes:  [3]node[T]{n},
+			nodes:  [3]*node[T]{n.asNode()},
 		}
 	}
 	if status == returnReplaced {
 		return nodeReturn[T]{
 			status: status,
-			nodes:  [3]node[T]{n},
+			nodes:  [3]*node[T]{n.asNode()},
 		}
 	}
 	return nodeReturn[T]{status: returnEarly}
 }
 
 func (n *internalNode[T]) copyAndModify(
-	ins int,
+	ins int8,
 	eq eqFunc[T],
 	edit *atomic.Bool,
-	newNode node[T],
+	newNode *node[T],
 	status returnStatus,
 ) nodeReturn[T] {
 	var newKeys []T
@@ -107,32 +111,34 @@ func (n *internalNode[T]) copyAndModify(
 		newKeys[ins] = newNode.maxKey()
 	}
 
-	var newChildren []node[T]
+	var newChildren []*node[T]
 	if newNode == n.children[ins] {
 		newChildren = n.children
 	} else {
-		newChildren = make([]node[T], n.len)
+		newChildren = make([]*node[T], n.len)
 		copy(newChildren, n.children)
 		newChildren[ins] = newNode
 	}
+	outNode := &internalNode[T]{
+		node: node[T]{
+			kind: nodeKindInternal,
+			keys: newKeys,
+			len:  n.len,
+			edit: edit,
+		},
+		children: newChildren,
+	}
 	return nodeReturn[T]{
 		status: status,
-		nodes: [3]node[T]{
-			&internalNode[T]{
-				leafNode: &leafNode[T]{
-					keys: newKeys,
-					len:  n.len,
-					edit: edit,
-				},
-				children: newChildren,
-			},
+		nodes: [3]*node[T]{
+			outNode.asNode(),
 		},
 	}
 }
 
 func (n *internalNode[T]) copyAndAppend(
-	ins int,
-	n1, n2 node[T],
+	ins int8,
+	n1, n2 *node[T],
 	edit *atomic.Bool,
 ) nodeReturn[T] {
 	newNode := newNode[T](n.len+1, edit)
@@ -150,13 +156,13 @@ func (n *internalNode[T]) copyAndAppend(
 
 	return nodeReturn[T]{
 		status: returnOne,
-		nodes:  [3]node[T]{newNode},
+		nodes:  [3]*node[T]{newNode.asNode()},
 	}
 }
 
 func (n *internalNode[T]) split(
-	ins int,
-	n1, n2 node[T],
+	ins int8,
+	n1, n2 *node[T],
 	edit *atomic.Bool,
 ) nodeReturn[T] {
 	half1 := (n.len + 1) >> 1
@@ -186,9 +192,9 @@ func (n *internalNode[T]) split(
 
 		return nodeReturn[T]{
 			status: returnTwo,
-			nodes: [3]node[T]{
-				node1,
-				node2,
+			nodes: [3]*node[T]{
+				node1.asNode(),
+				node2.asNode(),
 			},
 		}
 	}
@@ -210,25 +216,25 @@ func (n *internalNode[T]) split(
 
 	return nodeReturn[T]{
 		status: returnTwo,
-		nodes: [3]node[T]{
-			node1,
-			node2,
+		nodes: [3]*node[T]{
+			node1.asNode(),
+			node2.asNode(),
 		},
 	}
 }
 
 func (n *internalNode[T]) remove(
 	key T,
-	leftNode, rightNode node[T],
+	leftNode, rightNode *node[T],
 	cmp compareFunc[T],
 	edit *atomic.Bool,
 ) nodeReturn[T] {
 	var left, right *internalNode[T]
 	if leftNode != nil {
-		left = leftNode.(*internalNode[T])
+		left = leftNode.asInternalNode()
 	}
 	if rightNode != nil {
-		right = rightNode.(*internalNode[T])
+		right = rightNode.asInternalNode()
 	}
 	return n.removeInternal(
 		key, left, right, cmp, edit)
@@ -248,11 +254,11 @@ func (n *internalNode[T]) removeInternal(
 		return nodeReturn[T]{status: returnUnchanged}
 	}
 
-	var leftChild node[T]
+	var leftChild *node[T]
 	if idx > 0 {
 		leftChild = n.children[idx-1]
 	}
-	var rightChild node[T]
+	var rightChild *node[T]
 	if idx < n.len-1 {
 		rightChild = n.children[idx+1]
 	}
@@ -304,18 +310,18 @@ func (n *internalNode[T]) removeInternal(
 }
 
 func (n *internalNode[T]) needsRebalance(
-	newLen int,
+	newLen int8,
 	left, right *internalNode[T],
 ) bool {
 	return newLen < minLen && (left != nil || right != nil)
 }
 
 func (n *internalNode[T]) removeInPlace(
-	idx int,
-	newLen int,
+	idx int8,
+	newLen int8,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*node[T],
 ) nodeReturn[T] {
 	ks := keyStitcher[T]{n.keys, max(idx-1, 0)}
 	if nodes[0] != nil {
@@ -342,15 +348,16 @@ func (n *internalNode[T]) removeInPlace(
 	}
 
 	n.len = newLen
+	clear(n.keys[n.len:])
 	return nodeReturn[T]{status: returnEarly}
 }
 
 func (n *internalNode[T]) copyAndRemoveIdx(
-	idx int,
-	newLen int,
+	idx int8,
+	newLen int8,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*node[T],
 ) nodeReturn[T] {
 	newCenter := newNode[T](newLen, edit)
 
@@ -378,20 +385,20 @@ func (n *internalNode[T]) copyAndRemoveIdx(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes: [3]node[T]{
+		nodes: [3]*node[T]{
 			internalNodeToNode(left),
-			newCenter,
+			newCenter.asNode(),
 			internalNodeToNode(right),
 		},
 	}
 }
 
 func (n *internalNode[T]) joinLeft(
-	idx int,
-	newLen int,
+	idx int8,
+	newLen int8,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*node[T],
 ) nodeReturn[T] {
 	join := newNode[T](left.len+newLen, edit)
 
@@ -421,16 +428,16 @@ func (n *internalNode[T]) joinLeft(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [3]node[T]{nil, join, internalNodeToNode(right)},
+		nodes:  [3]*node[T]{nil, join.asNode(), internalNodeToNode(right)},
 	}
 }
 
 func (n *internalNode[T]) joinRight(
-	idx int,
-	newLen int,
+	idx int8,
+	newLen int8,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*node[T],
 ) nodeReturn[T] {
 	join := newNode[T](newLen+right.len, edit)
 
@@ -460,16 +467,16 @@ func (n *internalNode[T]) joinRight(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [3]node[T]{internalNodeToNode(left), join, nil},
+		nodes:  [3]*node[T]{internalNodeToNode(left), join.asNode(), nil},
 	}
 }
 
 func (n *internalNode[T]) borrowLeft(
-	idx int,
-	newLen int,
+	idx int8,
+	newLen int8,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*node[T],
 ) nodeReturn[T] {
 	var (
 		totalLen     = left.len + newLen
@@ -510,16 +517,20 @@ func (n *internalNode[T]) borrowLeft(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [3]node[T]{newLeft, newCenter, internalNodeToNode(right)},
+		nodes:  [3]*node[T]{
+			newLeft.asNode(),
+			newCenter.asNode(),
+			internalNodeToNode(right),
+		},
 	}
 }
 
 func (n *internalNode[T]) borrowRight(
-	idx int,
-	newLen int,
+	idx int8,
+	newLen int8,
 	left, right *internalNode[T],
 	edit *atomic.Bool,
-	nodes [3]node[T],
+	nodes [3]*node[T],
 ) nodeReturn[T] {
 	var (
 		totalLen     = newLen + right.len
@@ -561,7 +572,11 @@ func (n *internalNode[T]) borrowRight(
 
 	return nodeReturn[T]{
 		status: returnThree,
-		nodes:  [3]node[T]{internalNodeToNode(left), newCenter, newRight},
+		nodes:  [3]*node[T]{
+			internalNodeToNode(left),
+			newCenter.asNode(),
+			newRight.asNode(),
+		},
 	}
 }
 
@@ -572,7 +587,7 @@ func (n *internalNode[T]) String() string {
 }
 
 func (n *internalNode[T]) string(b *strings.Builder, lvl int) {
-	for i := 0; i < n.len; i++ {
+	for i := int8(0); i < n.len; i++ {
 		b.WriteString("\n")
 		for j := 0; j < lvl; j++ {
 			b.WriteString("| ")
@@ -582,9 +597,9 @@ func (n *internalNode[T]) string(b *strings.Builder, lvl int) {
 	}
 }
 
-func internalNodeToNode[T any](n *internalNode[T]) node[T] {
+func internalNodeToNode[T any](n *internalNode[T]) *node[T] {
 	if n != nil {
-		return n
+		return n.asNode()
 	}
 	return nil
 }

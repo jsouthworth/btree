@@ -2,6 +2,7 @@
 package btree
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 
@@ -17,7 +18,7 @@ func (e Error) Error() string {
 const ErrTafterP = Error("transient used after persistent call")
 
 type BTree[T any] struct {
-	root    node[T]
+	root    *node[T]
 	count   int
 	version int
 	edit    *atomic.Bool
@@ -30,7 +31,7 @@ var emptyEdit = atomic.NewBool(false)
 
 func Empty[T any](cmp func(a, b T) int, eq func(a, b T) bool) *BTree[T] {
 	return &BTree[T]{
-		root: newLeaf[T](0, emptyEdit),
+		root: newLeaf[T](0, emptyEdit).asNode(),
 		edit: emptyEdit,
 		cmp:  cmp,
 		eq:   eq,
@@ -53,7 +54,7 @@ func (t *BTree[T]) Find(key T) (T, bool) {
 
 func (t *BTree[T]) Add(key T) *BTree[T] {
 	ret := t.root.add(key, t.cmp, t.eq, t.edit)
-	var newRoot node[T]
+	var newRoot *node[T]
 	switch ret.status {
 	case returnUnchanged:
 		return t
@@ -73,7 +74,7 @@ func (t *BTree[T]) Add(key T) *BTree[T] {
 		nr.keys[0] = ret.nodes[0].maxKey()
 		nr.keys[1] = ret.nodes[1].maxKey()
 		copy(nr.children, ret.nodes[:])
-		newRoot = nr
+		newRoot = nr.asNode()
 	}
 	return &BTree[T]{
 		root:    newRoot,
@@ -91,8 +92,8 @@ func (t *BTree[T]) Delete(key T) *BTree[T] {
 		return t
 	}
 	newRoot := ret.nodes[1] // center
-	if nr, ok := newRoot.(*internalNode[T]); ok && nr.len == 1 {
-		newRoot = nr.children[0]
+	if newRoot.isInternalNode() && newRoot.len == 1 {
+		newRoot = newRoot.asInternalNode().children[0]
 	}
 	return &BTree[T]{
 		root:    newRoot,
@@ -131,12 +132,12 @@ type Iterator[T any] struct {
 	cmp   compareFunc[T]
 	depth int
 	stack [maxIterDepth]struct {
-		n   node[T]
-		cur int
+		n   *node[T]
+		cur int8
 	}
 }
 
-func makeIterator[T any](cmp compareFunc[T], n node[T]) Iterator[T] {
+func makeIterator[T any](cmp compareFunc[T], n *node[T]) Iterator[T] {
 	var i Iterator[T]
 	i.cmp = cmp
 	i.stack[0].n = n
@@ -145,7 +146,7 @@ func makeIterator[T any](cmp compareFunc[T], n node[T]) Iterator[T] {
 
 func (i *Iterator[T]) Next() T {
 	state := i.stack[i.depth]
-	n := state.n.(*leafNode[T])
+	n := state.n.asLeafNode()
 	out := n.keys[state.cur]
 	i.stack[i.depth].cur++
 	return out
@@ -153,8 +154,9 @@ func (i *Iterator[T]) Next() T {
 
 func (i *Iterator[T]) HasNext() bool {
 	state := i.stack[i.depth]
-	switch n := state.n.(type) {
-	case *leafNode[T]:
+	switch state.n.kind {
+	case nodeKindLeaf:
+		n := state.n.asLeafNode()
 		if state.cur < n.len {
 			return true
 		}
@@ -163,15 +165,16 @@ func (i *Iterator[T]) HasNext() bool {
 		}
 		i.popNode()
 		return i.HasNext()
-	case *internalNode[T]:
+	case nodeKindInternal:
+		n := state.n.asInternalNode()
 		if state.cur < n.len {
 			child := n.children[state.cur]
 			i.stack[i.depth].cur++
 			i.pushNode(child)
-			switch child.(type) {
-			case *leafNode[T]:
+			switch child.kind {
+			case nodeKindLeaf:
 				return true
-			case *internalNode[T]:
+			case nodeKindInternal:
 				return i.HasNext()
 			}
 		}
@@ -185,7 +188,7 @@ func (i *Iterator[T]) HasNext() bool {
 	}
 }
 
-func (i *Iterator[T]) pushNode(n node[T]) {
+func (i *Iterator[T]) pushNode(n *node[T]) {
 	i.depth = i.depth + 1
 	state := i.stack[i.depth]
 	state.n = n
@@ -204,15 +207,17 @@ func (i *Iterator[T]) popNode() {
 func (i *Iterator[T]) findFirst(from T) {
 	for {
 		state := i.stack[i.depth]
-		switch n := state.n.(type) {
-		case *leafNode[T]:
+		switch state.n.kind {
+		case nodeKindLeaf:
+			n := state.n.asLeafNode()
 			first := n.searchFirst(from, i.cmp)
 			i.stack[i.depth].cur = first
 			return
-		case *internalNode[T]:
+		case nodeKindInternal:
+			n := state.n.asInternalNode()
 			first := n.searchFirst(from, i.cmp)
-			if first >= len(n.children) {
-				i.stack[i.depth].cur = len(n.children)
+			if first >= n.sizeOfChildArray() {
+				i.stack[i.depth].cur = n.sizeOfChildArray()
 				return
 			}
 			child := n.children[first]
@@ -223,7 +228,7 @@ func (i *Iterator[T]) findFirst(from T) {
 }
 
 type TBTree[T any] struct {
-	root    node[T]
+	root    *node[T]
 	count   int
 	version int
 	edit    *atomic.Bool
@@ -282,7 +287,7 @@ func (t *TBTree[T]) Add(key T) *TBTree[T] {
 		nr.keys[0] = ret.nodes[0].maxKey()
 		nr.keys[1] = ret.nodes[1].maxKey()
 		copy(nr.children, ret.nodes[:])
-		t.root = nr
+		t.root = nr.asNode()
 	}
 	t.count++
 	t.version++
@@ -298,7 +303,8 @@ func (t *TBTree[T]) Delete(key T) *TBTree[T] {
 	case returnEarly:
 	default:
 		newRoot := ret.nodes[1] // center
-		if nr, ok := newRoot.(*internalNode[T]); ok && nr.len == 1 {
+		if newRoot.isInternalNode() && newRoot.len == 1 {
+			nr := newRoot.asInternalNode()
 			newRoot = nr.children[0]
 		}
 		t.root = newRoot
@@ -365,17 +371,6 @@ const (
 	maxIterDepth = (64 + 1) / 5
 )
 
-type node[T any] interface {
-	search(key T, cmp compareFunc[T]) int
-	searchFirst(key T, cmp compareFunc[T]) int
-	find(key T, cmp compareFunc[T]) (T, bool)
-	add(key T, cmp compareFunc[T], eq eqFunc[T], edit *atomic.Bool) nodeReturn[T]
-	remove(key T, left, right node[T], cmp compareFunc[T], edit *atomic.Bool) nodeReturn[T]
-	leafPart() *leafNode[T]
-	maxKey() T
-	string(b *strings.Builder, lvl int)
-}
-
 type returnStatus uint8
 
 const (
@@ -402,7 +397,7 @@ func (s returnStatus) String() string {
 
 type nodeReturn[T any] struct {
 	status returnStatus
-	nodes  [3]node[T]
+	nodes  [3]*node[T]
 }
 
 func (r nodeReturn[T]) String() string {
@@ -410,14 +405,14 @@ func (r nodeReturn[T]) String() string {
 		r.status, r.nodes[0], r.nodes[1], r.nodes[2])
 }
 
-func min(a, b int) int {
+func min[T cmp.Ordered](a, b T) T {
 	if a < b {
 		return a
 	}
 	return b
 }
 
-func max(a, b int) int {
+func max[T cmp.Ordered](a, b T) T {
 	if a > b {
 		return a
 	}
