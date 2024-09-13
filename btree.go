@@ -4,6 +4,7 @@ package btree
 import (
 	"cmp"
 	"fmt"
+	"iter"
 	"strings"
 
 	"jsouthworth.net/go/btree/internal/atomic"
@@ -115,17 +116,40 @@ func (t *BTree[T]) String() string {
 	return b.String()
 }
 
+
+// Iterator returns a stack allocated iterator. One may range over
+// this using (Iterator[T]).Seq(). This can be useful to avoid
+// allocations during iteration.
 func (t *BTree[T]) Iterator() Iterator[T] {
 	i := makeIterator(t.cmp, t.root)
 	i.HasNext() // Make sure the initial iterator value is valid
 	return i
 }
 
+// All allows one to range over the BTree. This will allocate memory
+// on the heap for the iterator structure.
+func (t *BTree[T]) All() iter.Seq[T] {
+	i := t.Iterator()
+	return i.Seq
+}
+
+// IteratorFrom allows one to start iterating with the first element
+// greater than or equal to "from". One may range over this using
+// (Iterator[T]).Seq. This can be useful to avoid allocations during
+// iteration.
 func (t *BTree[T]) IteratorFrom(from T) Iterator[T] {
 	i := makeIterator(t.cmp, t.root)
 	i.findFirst(from)
 	i.HasNext() // Make sure the initial iterator value is valid
 	return i
+}
+
+// From allows one to range over the BTree starting with the first
+// element greater than or equal to "from". This will allocate memory
+// on the heap for the iterator structure.
+func (t *BTree[T]) From(from T) iter.Seq[T] {
+	i := t.IteratorFrom(from)
+	return i.Seq
 }
 
 type Iterator[T any] struct {
@@ -134,6 +158,14 @@ type Iterator[T any] struct {
 	stack [maxIterDepth]struct {
 		n   *node[T]
 		cur int8
+	}
+}
+
+func (i *Iterator[T]) Seq(yield func(T) bool) {
+	for i.HasNext() {
+		if !yield(i.Next()) {
+			break;
+		}
 	}
 }
 
@@ -314,11 +346,43 @@ func (t *TBTree[T]) Delete(key T) *TBTree[T] {
 	return t
 }
 
+// Iterator returns a stack allocated iterator. One may range over
+// this using (Iterator[T]).Seq. This can be useful to avoid
+// allocations during iteration.
 func (t *TBTree[T]) Iterator() Iterator[T] {
 	t.ensureEditable()
 	i := makeIterator(t.cmp, t.root)
 	i.HasNext() // Make sure the initial iterator value is valid
 	return i
+}
+
+// All allows one to range over the BTree. This will allocate memory
+// on the heap for the iterator structure.
+func (t *TBTree[T]) All() iter.Seq[T] {
+	t.ensureEditable()
+	i := t.Iterator()
+	return i.Seq
+}
+
+// IteratorFrom allows one to start iterating with the first element
+// greater than or equal to "from". One may range over this using
+// (Iterator[T]).Seq. This can be useful to avoid allocations during
+// iteration.
+func (t *TBTree[T]) IteratorFrom(from T) Iterator[T] {
+	t.ensureEditable()
+	i := makeIterator(t.cmp, t.root)
+	i.findFirst(from)
+	i.HasNext() // Make sure the initial iterator value is valid
+	return i
+}
+
+// From allows one to range over the BTree starting with the first
+// element greater than or equal to "from". This will allocate memory
+// on the heap for the iterator structure.
+func (t *TBTree[T]) From(from T) iter.Seq[T] {
+	t.ensureEditable()
+	i := t.IteratorFrom(from)
+	return i.Seq
 }
 
 func (t *TBTree[T]) Length() int {

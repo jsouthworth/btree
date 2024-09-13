@@ -508,6 +508,29 @@ func BenchmarkIter(b *testing.B) {
 	}
 }
 
+func BenchmarkSeq(b *testing.B) {
+	t := btree.Empty(compare[int], eq[int]).AsTransient()
+	for i := 0; i < b.N; i++ {
+		t = t.Add(i)
+	}
+	p := t.AsPersistent()
+	b.ResetTimer()
+	iter := p.Iterator()
+	for _ = range iter.Seq {
+	}
+}
+
+func BenchmarkBTreeAll(b *testing.B) {
+	t := btree.Empty(compare[int], eq[int]).AsTransient()
+	for i := 0; i < b.N; i++ {
+		t = t.Add(i)
+	}
+	p := t.AsPersistent()
+	b.ResetTimer()
+	for _ = range p.All() {
+	}
+}
+
 func BenchmarkBuiltinMapAdd(b *testing.B) {
 	m := make(map[int]int)
 	for i := 0; i < b.N; i++ {
@@ -638,6 +661,57 @@ func TestIterator(t *testing.T) {
 	}
 }
 
+func TestIteratorSeq(t *testing.T) {
+	tree := btree.Empty(compare[int], eq[int]).AsTransient()
+	var sum int
+	for i := 0; i < 100000; i++ {
+		tree = tree.Add(i)
+		sum += i
+	}
+	p := tree.AsPersistent()
+	iter := p.Iterator()
+	var got int
+	for v := range iter.Seq {
+		got += v
+	}
+	if sum != got {
+		t.Fatalf("didn't get expected value from iteration: got %v expected %v", got, sum)
+	}
+}
+
+func TestBTreeAll(t *testing.T) {
+	tree := btree.Empty(compare[int], eq[int]).AsTransient()
+	var sum int
+	for i := 0; i < 100000; i++ {
+		tree = tree.Add(i)
+		sum += i
+	}
+	p := tree.AsPersistent()
+	var got int
+	for v := range p.All() {
+		got += v
+	}
+	if sum != got {
+		t.Fatalf("didn't get expected value from iteration: got %v expected %v", got, sum)
+	}
+}
+
+func TestTBTreeAll(t *testing.T) {
+	tree := btree.Empty(compare[int], eq[int]).AsTransient()
+	var sum int
+	for i := 0; i < 100000; i++ {
+		tree = tree.Add(i)
+		sum += i
+	}
+	var got int
+	for v := range tree.All() {
+		got += v
+	}
+	if sum != got {
+		t.Fatalf("didn't get expected value from iteration: got %v expected %v", got, sum)
+	}
+}
+
 func TestIteratorFrom(t *testing.T) {
 	var froms = []int{-10, 0, 99997, 100000, 100001}
 	sums := make([]int, len(froms))
@@ -658,6 +732,84 @@ func TestIteratorFrom(t *testing.T) {
 		var got int
 		for iter.HasNext() {
 			val := iter.Next()
+			got += val
+		}
+		if sums[i] != got {
+			t.Fatalf("didn't get expected value from iteration: got %v expected %v", got, sums[i])
+		}
+	}
+}
+
+func TestIteratorFromSeq(t *testing.T) {
+	var froms = []int{-10, 0, 99997, 100000, 100001}
+	sums := make([]int, len(froms))
+	tree := btree.Empty(compare[int], eq[int]).AsTransient()
+	for i, from := range froms {
+		var sum int
+		for i := 0; i < 100000; i++ {
+			tree = tree.Add(i)
+			if i >= from {
+				sum += i
+			}
+		}
+		sums[i] = sum
+	}
+	p := tree.AsPersistent()
+	for i, from := range froms {
+		iter := p.IteratorFrom(from)
+		var got int
+		for val := range iter.Seq {
+			got += val
+		}
+		if sums[i] != got {
+			t.Fatalf("didn't get expected value from iteration: got %v expected %v", got, sums[i])
+		}
+	}
+}
+
+func TestBTreeFrom(t *testing.T) {
+	var froms = []int{-10, 0, 99997, 100000, 100001}
+	sums := make([]int, len(froms))
+	tree := btree.Empty(compare[int], eq[int]).AsTransient()
+	for i, from := range froms {
+		var sum int
+		for i := 0; i < 100000; i++ {
+			tree = tree.Add(i)
+			if i >= from {
+				sum += i
+			}
+		}
+		sums[i] = sum
+	}
+	p := tree.AsPersistent()
+	for i, from := range froms {
+		var got int
+		for val := range p.From(from) {
+			got += val
+		}
+		if sums[i] != got {
+			t.Fatalf("didn't get expected value from iteration: got %v expected %v", got, sums[i])
+		}
+	}
+}
+
+func TestTBTreeFrom(t *testing.T) {
+	var froms = []int{-10, 0, 99997, 100000, 100001}
+	sums := make([]int, len(froms))
+	tree := btree.Empty(compare[int], eq[int]).AsTransient()
+	for i, from := range froms {
+		var sum int
+		for i := 0; i < 100000; i++ {
+			tree = tree.Add(i)
+			if i >= from {
+				sum += i
+			}
+		}
+		sums[i] = sum
+	}
+	for i, from := range froms {
+		var got int
+		for val := range tree.From(from) {
 			got += val
 		}
 		if sums[i] != got {
